@@ -2,13 +2,42 @@
   "Version": "2012-10-17",
   "Statement": [
     {
+      "Sid": "DynamoDbAccess",
       "Effect": "Allow",
       "Action": [
-        "dynamodb:*",
-        "sqs:*",
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "dynamodb:BatchGetItem",
+        "dynamodb:BatchWriteItem"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:ap-southeast-2:*:table/orders",
+        "arn:aws:dynamodb:ap-southeast-2:*:table/orders/index/*"
+      ]
+    },
+    {
+      "Sid": "SqsAccess",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:SendMessage",
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:GetQueueUrl"
+      ],
+      "Resource": "arn:aws:sqs:ap-southeast-2:*:delivery-*"
+    },
+    {
+      "Sid": "SnsPublish",
+      "Effect": "Allow",
+      "Action": [
         "sns:Publish"
       ],
-      "Resource": "*"
+      "Resource": "arn:aws:sns:ap-southeast-2:*:delivery-*"
     }
   ]
 }

@@ -1,0 +1,123 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "2.12 — SNS Topics, Subscriptions, Fan-out Pattern"
+
+# =============================================================================
+# WHAT IS SNS?
+# =============================================================================
+# SNS (Simple Notification Service) is a pub/sub messaging service.
+#
+# Publisher → sends ONE message to SNS topic
+# SNS       → delivers that message to ALL subscribers simultaneously
+#
+# This is called FAN-OUT — one message fans out to many consumers.
+#
+# WHY USE SNS INSTEAD OF SENDING DIRECTLY TO SQS?
+# Without SNS: if you add a new consumer, you must change your publisher code.
+# With SNS:    publisher sends to ONE topic. Adding a new consumer = add new subscription.
+#              Publisher code never changes.
+#
+# REAL WORLD EXAMPLE (this delivery platform):
+# Order service publishes "ORDER_CREATED" to SNS once.
+# SNS delivers it to:
+#   notification-queue → sends email/SMS to customer
+#   analytics-queue    → records event for metrics/reporting
+# Both happen simultaneously and independently.
+#
+# Flow:
+#   Spring Service (OrderSnsPublisher.java)
+#         │ publishes once
+#         ▼
+#   SNS Topic: order-events
+#         │
+#         ├──► SQS: notification-queue  → sends email/SMS to customer
+#         │
+#         └──► SQS: analytics-queue     → records for reporting
+# =============================================================================
+
+Resources:
+
+  # ── SNS Topic ─────────────────────────────────────────────────────────────
+  # The topic is just a channel — it holds no messages.
+  # Publishers send to the topic, SNS immediately forwards to all subscribers.
+  OrderEventsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: order-events
+
+  # ── SQS Queue 1: Notification ─────────────────────────────────────────────
+  # Receives ORDER_CREATED events only (filter policy set on subscription below)
+  # A separate consumer reads this queue and sends email/SMS
+  NotificationQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: notification-queue
+      # VisibilityTimeout must be >= consumer processing time
+      # If sending email takes up to 30s and we retry 3 times → 90s minimum
+      VisibilityTimeout: 90
+
+  # ── SQS Queue 2: Analytics ────────────────────────────────────────────────
+  # Receives ALL events (no filter) — used for reporting and metrics
+  AnalyticsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: analytics-queue
+      VisibilityTimeout: 90
+
+  # ── Queue Policies ────────────────────────────────────────────────────────
+  # By default SQS rejects messages from everyone including SNS.
+  # These policies explicitly allow SNS to send messages to each queue.
+  # The Condition restricts it to only THIS specific SNS topic — not any SNS topic.
+  NotificationQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref NotificationQueue]
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: { Service: sns.amazonaws.com }
+            Action: sqs:SendMessage
+            Resource: !GetAtt NotificationQueue.Arn
+            Condition:
+              ArnEquals: { aws:SourceArn: !Ref OrderEventsTopic }
+
+  AnalyticsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref AnalyticsQueue]
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: { Service: sns.amazonaws.com }
+            Action: sqs:SendMessage
+            Resource: !GetAtt AnalyticsQueue.Arn
+            Condition:
+              ArnEquals: { aws:SourceArn: !Ref OrderEventsTopic }
+
+  # ── SNS Subscriptions ────────────────────────────────────────────────────
+  # A subscription wires the topic to a specific queue.
+  # Without a subscription the queue receives nothing even if messages are published.
+  #
+  # RawMessageDelivery: true
+  #   → SQS receives your raw JSON payload directly
+  #   → RawMessageDelivery: false (default) wraps payload in SNS envelope JSON
+  #   → Always use true when consumer is SQS — avoids extra parsing
+  NotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref OrderEventsTopic
+      Protocol: sqs
+      Endpoint: !GetAtt NotificationQueue.Arn
+      RawMessageDelivery: true
+
+  AnalyticsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref OrderEventsTopic
+      Protocol: sqs
+      Endpoint: !GetAtt AnalyticsQueue.Arn
+      RawMessageDelivery: true
+
+Outputs:
+  TopicArn:             { Value: !Ref OrderEventsTopic }
+  NotificationQueueUrl: { Value: !Ref NotificationQueue }
+  AnalyticsQueueUrl:    { Value: !Ref AnalyticsQueue }

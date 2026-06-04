@@ -1,0 +1,116 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "2.13 — SNS Message Envelope, Filter Policies"
+
+# =============================================================================
+# 2.13 — SNS MESSAGE ENVELOPE + FILTER POLICIES
+# =============================================================================
+#
+# ── MESSAGE ENVELOPE ──────────────────────────────────────────────────────────
+# When you publish to SNS and the subscriber is SQS, by default SQS receives
+# a wrapped JSON envelope (not your raw payload):
+#
+#  {
+#    "Type"             : "Notification",
+#    "MessageId"        : "abc-123",
+#    "TopicArn"         : "arn:aws:sns:...:order-events",
+#    "Message"          : "{\"orderId\":\"1\",\"status\":\"CREATED\"}",  ← nested string
+#    "MessageAttributes": { "eventType": { "Type": "String", "Value": "ORDER_CREATED" } }
+#  }
+#
+# To avoid this wrapping, set RawMessageDelivery: true on the subscription.
+# Then SQS receives: {"orderId":"1","status":"CREATED"} directly.
+# Always use RawMessageDelivery: true when consumer is SQS.
+#
+# ── FILTER POLICIES ──────────────────────────────────────────────────────────
+# By default ALL messages published to a topic go to ALL subscribers.
+# Filter policies let each subscriber say: "I only want messages where X = Y".
+#
+# Filter is set on the SUBSCRIPTION (not the topic).
+# Filter is based on MESSAGE ATTRIBUTES (headers you add when publishing).
+#
+# Example:
+#   Publisher adds header: eventType = ORDER_CREATED
+#   notification-queue filter: eventType must be ORDER_CREATED
+#   → notification-queue only receives ORDER_CREATED events
+#   → ORDER_DELIVERED events are NOT delivered to notification-queue (filtered out)
+#   → analytics-queue has no filter → receives everything
+#
+# WHY USE FILTER POLICIES?
+#   Without filters: every consumer receives every message and must check/ignore irrelevant ones
+#   With filters:    SNS does the filtering → consumer only gets what it needs → cheaper + simpler
+# =============================================================================
+
+Resources:
+
+  OrderEventsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: order-events-filtered
+
+  NotificationQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: notification-queue-filtered
+      VisibilityTimeout: 90
+
+  AnalyticsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: analytics-queue-filtered
+      VisibilityTimeout: 90
+
+  NotificationQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref NotificationQueue]
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: { Service: sns.amazonaws.com }
+            Action: sqs:SendMessage
+            Resource: !GetAtt NotificationQueue.Arn
+            Condition:
+              ArnEquals: { aws:SourceArn: !Ref OrderEventsTopic }
+
+  AnalyticsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref AnalyticsQueue]
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: { Service: sns.amazonaws.com }
+            Action: sqs:SendMessage
+            Resource: !GetAtt AnalyticsQueue.Arn
+            Condition:
+              ArnEquals: { aws:SourceArn: !Ref OrderEventsTopic }
+
+  # ── Subscription WITH Filter Policy ─────────────────────────────────────────
+  # notification-queue only receives messages where eventType = ORDER_CREATED
+  # If you publish with eventType = ORDER_DELIVERED → this queue gets nothing
+  NotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref OrderEventsTopic
+      Protocol: sqs
+      Endpoint: !GetAtt NotificationQueue.Arn
+      RawMessageDelivery: true
+      FilterPolicy:
+        eventType:
+          - ORDER_CREATED     # only this value is allowed through
+
+  # ── Subscription WITHOUT Filter Policy ──────────────────────────────────────
+  # analytics-queue receives ALL events regardless of eventType value
+  AnalyticsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref OrderEventsTopic
+      Protocol: sqs
+      Endpoint: !GetAtt AnalyticsQueue.Arn
+      RawMessageDelivery: true
+      # no FilterPolicy here = receive every message published to the topic
+
+Outputs:
+  TopicArn:             { Value: !Ref OrderEventsTopic }
+  NotificationQueueUrl: { Value: !Ref NotificationQueue }
+  AnalyticsQueueUrl:    { Value: !Ref AnalyticsQueue }

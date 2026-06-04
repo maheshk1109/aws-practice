@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "2.8 — DynamoDB Streams setup + Lambda event source mapping"
+
+# =============================================================================
+# WHAT ARE DYNAMODB STREAMS?
+# =============================================================================
+# Every time an item is inserted, updated, or deleted in DynamoDB,
+# a record is written to the DynamoDB Stream.
+#
+# The stream record contains:
+#   INSERT → NewImage only  (the new item)
+#   MODIFY → OldImage + NewImage (before and after)
+#   REMOVE → OldImage only (the deleted item)
+#
+# WHY USE STREAMS?
+#   - Trigger a Lambda when data changes (event-driven)
+#   - Sync data to another system (e.g. ElasticSearch, SQS)
+#   - Audit trail — record every change to an item
+#   - React to status changes (order status → send notification)
+#
+# STREAM VIEW TYPES:
+#   KEYS_ONLY         → only PK and SK in the record (smallest payload)
+#   NEW_IMAGE         → only the new item after change
+#   OLD_IMAGE         → only the old item before change
+#   NEW_AND_OLD_IMAGES → both before and after (most useful, larger payload)
+# =============================================================================
+
+Parameters:
+  LambdaRoleArn:
+    Type: String
+    Description: IAM role ARN for the Lambda function (needs DynamoDB stream + CloudWatch logs permissions)
+
+Resources:
+
+  # ── DynamoDB Table with Stream enabled ───────────────────────────────────────
+  DeliveryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: delivery-platform
+      BillingMode: PAY_PER_REQUEST   # on-demand billing — pay per read/write, no capacity planning
+
+      AttributeDefinitions:
+        - { AttributeName: pk,         AttributeType: S }
+        - { AttributeName: sk,         AttributeType: S }
+        - { AttributeName: customerId, AttributeType: S }
+
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH  }  # partition key
+        - { AttributeName: sk, KeyType: RANGE }  # sort key
+
+      GlobalSecondaryIndexes:
+        - IndexName: customerId-index
+          KeySchema:
+            - { AttributeName: customerId, KeyType: HASH }
+          Projection:
+            ProjectionType: ALL   # copies all attributes to the index
+
+      # ── Stream Configuration ──────────────────────────────────────────────────
+      # NEW_AND_OLD_IMAGES: Lambda receives both old and new values on every change
+      # This lets you detect what changed (e.g. status went from PENDING to DELIVERED)
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+      # TTL enabled — items with ttl attribute in the past are auto-deleted
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+      # PITR enabled — continuous backup, restore to any second in last 35 days
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ── Lambda Function ────────────────────────────────────────────────────────
+  # This is the handler in delivery/stream-handler/OrderStreamHandler.java
+  OrderStreamFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: order-stream-handler
+      Runtime: java21
+      Handler: com.example.delivery.stream.OrderStreamHandler::handleRequest
+      Role: !Ref LambdaRoleArn
+      MemorySize: 512
+      Timeout: 30
+      Code:
+        S3Bucket: my-deployment-bucket
+        S3Key: lambda/stream-handler.jar
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref DeliveryTable
+
+  # ── Event Source Mapping ──────────────────────────────────────────────────
+  # Connects the DynamoDB Stream to the Lambda function.
+  # Lambda polls the stream and invokes the function with a batch of records.
+  StreamTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt DeliveryTable.StreamArn
+      FunctionName: !GetAtt OrderStreamFunction.Arn
+
+      # TRIM_HORIZON = start from the oldest unprocessed record
+      # LATEST       = start from new records only (skip historical)
+      StartingPosition: TRIM_HORIZON
+
+      BatchSize: 10  # process up to 10 stream records per Lambda invocation
+
+      # If one record in the batch fails, split the batch in half and retry
+      # This helps isolate which specific record is causing the failure
+      BisectBatchOnFunctionError: true
+
+Outputs:
+  TableName:   { Value: !Ref DeliveryTable }
+  StreamArn:   { Value: !GetAtt DeliveryTable.StreamArn }
+  FunctionArn: { Value: !GetAtt OrderStreamFunction.Arn }

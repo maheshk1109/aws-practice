@@ -1,0 +1,274 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "2.19 + 2.20 + 2.21 — ECS Fargate: Task Definition, ALB, Auto Scaling"
+
+# =============================================================================
+# 2.19 — ECS FARGATE CONCEPTS, TASK DEFINITIONS, SERVICES
+# =============================================================================
+#
+# WHAT IS ECS FARGATE?
+# ECS (Elastic Container Service) runs Docker containers on AWS.
+# Fargate is the serverless compute mode — you don't manage EC2 instances.
+# AWS handles: server provisioning, patching, scaling the underlying hardware.
+# You just define CPU, memory, and the Docker image. AWS does the rest.
+#
+# KEY CONCEPTS:
+#   Cluster       = logical grouping of services (like a namespace)
+#   Task Definition = blueprint for a container (image, CPU, memory, ports, env vars)
+#   Task          = a running instance of a task definition (like a Pod in Kubernetes)
+#   Service       = keeps N tasks running, restarts failed ones, handles rolling deploys
+#
+# VALID CPU/MEMORY COMBINATIONS FOR FARGATE:
+#   CPU    Memory
+#   256    512MB – 2GB
+#   512    1GB   – 4GB
+#   1024   2GB   – 8GB
+#   2048   4GB   – 16GB
+#
+# =============================================================================
+# 2.20 — ECS NETWORKING: ALB, PRIVATE SUBNETS, SECURITY GROUPS, HEALTH CHECK
+# =============================================================================
+#
+# WHY PRIVATE SUBNETS?
+# Tasks run in private subnets — they have NO public IP address.
+# Traffic can only reach them THROUGH the ALB.
+# This is the correct security posture for production applications.
+#
+# SECURITY GROUP DESIGN:
+#   ALB Security Group  → allows port 80 from internet (0.0.0.0/0)
+#   App Security Group  → allows port 8080 ONLY from the ALB security group
+#   Result: tasks are unreachable directly from internet, only via ALB
+#
+# HEALTH CHECK:
+#   ALB pings /actuator/health every 30 seconds.
+#   If a task fails 3 consecutive health checks → ALB stops sending traffic to it.
+#   ECS then replaces the unhealthy task automatically.
+#
+# =============================================================================
+# 2.21 — ECS AUTO SCALING, ROLLING DEPLOY, ENVIRONMENT CONFIG
+# =============================================================================
+#
+# TARGET TRACKING AUTO SCALING:
+#   You set a target (e.g. keep average CPU at 60%).
+#   AWS adds tasks when CPU goes above 60%.
+#   AWS removes tasks when CPU drops back below 60%.
+#   ScaleOutCooldown = wait time before adding more tasks (avoid over-scaling)
+#   ScaleInCooldown  = wait time before removing tasks (avoid flapping)
+#
+# ROLLING DEPLOY:
+#   MinimumHealthyPercent: 50 → during deploy, at least 50% of tasks stay running
+#   MaximumPercent: 200        → during deploy, can have up to 2x the desired tasks
+#   Example with DesiredCount=2:
+#     → ECS starts 2 new tasks (total=4, which is 200% of 2)
+#     → waits for new tasks to pass health check
+#     → stops 2 old tasks (total=2 again, which is 100% of desired)
+#
+# SSM PARAMETER WIRING:
+#   DesiredCount is read from SSM Parameter Store instead of being hardcoded.
+#   This lets you change the task count at runtime without redeploying the stack:
+#     aws ssm put-parameter --name /lastmile/ecs/desired-count --value 4 --overwrite
+# =============================================================================
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC where ECS tasks and ALB will be deployed
+
+  PublicSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Public subnets for the ALB (needs internet access)
+
+  PrivateSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets for ECS tasks (no direct internet access)
+
+  ImageUri:
+    Type: String
+    Description: ECR image URI e.g. 123456789.dkr.ecr.ap-southeast-2.amazonaws.com/lastmile:latest
+
+  # SSM parameter — value resolved at deploy time
+  # Change task count without redeploying: aws ssm put-parameter --name /lastmile/ecs/desired-count --value 4
+  DesiredCount:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /lastmile/ecs/desired-count
+
+Resources:
+
+  # ── SSM Parameter (initial value = 2 tasks) ──────────────────────────────
+  DesiredCountParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /lastmile/ecs/desired-count
+      Type: String
+      Value: "2"
+
+  # ── Security Group: ALB ────────────────────────────────────────────────────
+  # Allows HTTP from anywhere on the internet
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB — allow HTTP from internet
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  # ── Security Group: ECS Tasks ─────────────────────────────────────────────
+  # Only allows traffic on port 8080 FROM the ALB security group
+  # Tasks are completely unreachable from internet directly
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS tasks — allow traffic only from ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+
+  # ── Application Load Balancer ─────────────────────────────────────────────
+  # Sits in PUBLIC subnets so it can receive traffic from the internet
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets: !Ref PublicSubnets
+      SecurityGroups: [!Ref AlbSecurityGroup]
+
+  # ── Target Group ──────────────────────────────────────────────────────────
+  # ALB routes requests to targets (ECS tasks) registered in this group
+  # TargetType: ip is required for Fargate (awsvpc network mode)
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip
+      # Spring Boot Actuator health endpoint — add spring-boot-starter-actuator to pom.xml
+      HealthCheckPath: /actuator/health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2    # 2 consecutive successes → task is healthy
+      UnhealthyThresholdCount: 3  # 3 consecutive failures  → task is unhealthy → replaced
+
+  # ── ALB Listener ─────────────────────────────────────────────────────────
+  # Listens on port 80 and forwards all traffic to the target group
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ── ECS Cluster ───────────────────────────────────────────────────────────
+  # Logical container for services and tasks
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: lastmile-cluster
+
+  # ── CloudWatch Log Group ───────────────────────────────────────────────────
+  # ECS tasks stream logs here via the awslogs log driver
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/lastmile
+      RetentionInDays: 7   # keep logs for 7 days — adjust based on compliance needs
+
+  # ── Task Definition ───────────────────────────────────────────────────────
+  # Blueprint for your container. Defines what to run and how.
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: lastmile-task
+      Cpu: "512"       # 0.5 vCPU
+      Memory: "1024"   # 1 GB RAM
+      NetworkMode: awsvpc           # required for Fargate — each task gets its own ENI
+      RequiresCompatibilities: [FARGATE]
+      # ExecutionRole: allows ECS to pull image from ECR and write logs to CloudWatch
+      ExecutionRoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/ecsTaskExecutionRole
+      ContainerDefinitions:
+        - Name: lastmile-app
+          Image: !Ref ImageUri
+          PortMappings:
+            - ContainerPort: 8080
+          Environment:
+            # inject environment variables into the container
+            - Name: SPRING_PROFILES_ACTIVE
+              Value: prod
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+          # awslogs driver sends stdout/stderr to CloudWatch Logs automatically
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: /ecs/lastmile
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: lastmile
+
+  # ── ECS Service ───────────────────────────────────────────────────────────
+  # Keeps DesiredCount tasks running at all times
+  # Restarts failed tasks, handles rolling deployments
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: Listener  # must wait for ALB listener to exist before registering targets
+    Properties:
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref DesiredCount  # read from SSM parameter
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets: !Ref PrivateSubnets    # tasks run in private subnets
+          SecurityGroups: [!Ref AppSecurityGroup]
+          AssignPublicIp: DISABLED        # no public IP — only reachable via ALB
+      LoadBalancers:
+        - ContainerName: lastmile-app
+          ContainerPort: 8080
+          TargetGroupArn: !Ref TargetGroup
+      # Rolling deployment configuration
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50   # keep at least 50% tasks running during deploy
+        MaximumPercent: 200         # can run up to 2x tasks during deploy
+
+  # ── Auto Scaling Target ───────────────────────────────────────────────────
+  # Registers the ECS service as something that can be auto scaled
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MinCapacity: 1    # never scale below 1 task
+      MaxCapacity: 10   # never scale above 10 tasks
+      ResourceId: !Sub service/${Cluster}/${Service.Name}
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  # ── CPU Target Tracking Policy ────────────────────────────────────────────
+  # Automatically adds/removes tasks to keep average CPU at 60%
+  # ScaleOutCooldown: wait 60s before adding more tasks (avoid adding too fast)
+  # ScaleInCooldown:  wait 300s before removing tasks (conservative — avoid flapping)
+  CpuScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: cpu-target-tracking
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: 60.0        # maintain average CPU at 60%
+        ScaleOutCooldown: 60     # 60s before scaling out again
+        ScaleInCooldown: 300     # 300s before scaling in — prevent flapping
+
+Outputs:
+  ALBDnsName:
+    Description: Access your app at this URL
+    Value: !GetAtt ALB.DNSName
+  ClusterName:
+    Value: !Ref Cluster
+  ServiceName:
+    Value: !GetAtt Service.Name
