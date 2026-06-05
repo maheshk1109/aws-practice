@@ -1,0 +1,41 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "DynamoDB delivery-platform table with Streams, TTL, PITR, GSI"
+
+Resources:
+
+  DeliveryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: delivery-platform
+      BillingMode: PAY_PER_REQUEST
+
+      AttributeDefinitions:
+        - { AttributeName: pk,         AttributeType: S }
+        - { AttributeName: sk,         AttributeType: S }
+        - { AttributeName: customerId, AttributeType: S }
+
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH  }
+        - { AttributeName: sk, KeyType: RANGE }
+
+      GlobalSecondaryIndexes:
+        - IndexName: customerId-index
+          KeySchema:
+            - { AttributeName: customerId, KeyType: HASH }
+          Projection:
+            ProjectionType: ALL
+
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+Outputs:
+  TableName: { Value: !Ref DeliveryTable }
+  TableArn:  { Value: !GetAtt DeliveryTable.Arn }
+  StreamArn: { Value: !GetAtt DeliveryTable.StreamArn }

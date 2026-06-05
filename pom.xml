@@ -33,6 +33,13 @@
     </dependencyManagement>
 
     <dependencies>
+        <!-- Swagger / OpenAPI UI -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>2.5.0</version>
+        </dependency>
+
         <!-- Web -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -62,6 +69,39 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>dynamodb-enhanced</artifactId>
             <version>${aws-sdk.version}</version>
+        </dependency>
+
+        <!-- AWS SDK v2 Secrets Manager (2.21) -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>secretsmanager</artifactId>
+            <version>${aws-sdk.version}</version>
+        </dependency>
+
+        <!-- AWS SDK v2 SSM Parameter Store (2.21) -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>ssm</artifactId>
+            <version>${aws-sdk.version}</version>
+        </dependency>
+
+        <!-- AWS X-Ray SDK — core + Spring interceptor (2.20) -->
+        <dependency>
+            <groupId>com.amazonaws</groupId>
+            <artifactId>aws-xray-recorder-sdk-core</artifactId>
+            <version>2.15.1</version>
+        </dependency>
+        <!-- Auto-instruments AWS SDK v2 calls (DynamoDB, SQS, SNS) with X-Ray subsegments -->
+        <dependency>
+            <groupId>com.amazonaws</groupId>
+            <artifactId>aws-xray-recorder-sdk-aws-sdk-v2-instrumentor</artifactId>
+            <version>2.15.1</version>
+        </dependency>
+        <!-- Servlet filter: creates X-Ray segment per HTTP request -->
+        <dependency>
+            <groupId>com.amazonaws</groupId>
+            <artifactId>aws-xray-recorder-sdk-spring</artifactId>
+            <version>2.15.1</version>
         </dependency>
 
         <!-- AWS SDK v2 CloudWatch (2.15) -->

@@ -3,10 +3,14 @@ package com.lastmile.config;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import software.amazon.awssdk.enhanced.dynamodb.DynamoDbEnhancedClient;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
+import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.sns.SnsClient;
 import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.ssm.SsmClient;
 
 import java.net.URI;
 
@@ -64,6 +68,15 @@ public class AwsConfig {
         return builder.build();
     }
 
+    // ── DynamoDB Enhanced Client ──────────────────────────────────────────────
+    // Wraps DynamoDbClient to map Java objects <-> DynamoDB items via @DynamoDbBean
+    @Bean
+    public DynamoDbEnhancedClient dynamoDbEnhancedClient(DynamoDbClient dynamoDbClient) {
+        return DynamoDbEnhancedClient.builder()
+                .dynamoDbClient(dynamoDbClient)
+                .build();
+    }
+
     // ── SQS Client ────────────────────────────────────────────────────────────
     // Spring Cloud AWS SQS starter needs SqsAsyncClient (not SqsClient)
     // because @SqsListener uses non-blocking polling internally
@@ -84,6 +97,50 @@ public class AwsConfig {
     @Bean
     public SnsClient snsClient() {
         var builder = SnsClient.builder()
+                .region(Region.of(region));
+
+        if (endpointOverride != null) {
+            builder.endpointOverride(URI.create(endpointOverride));
+        }
+
+        return builder.build();
+    }
+
+    // ── CloudWatch Client (2.18, 2.19) ──────────────────────────────────────────
+    // Used by CloudWatchService to publish custom metrics and create alarms
+    @Bean
+    public CloudWatchClient cloudWatchClient() {
+        var builder = CloudWatchClient.builder()
+                .region(Region.of(region));
+
+        if (endpointOverride != null) {
+            builder.endpointOverride(URI.create(endpointOverride));
+        }
+
+        return builder.build();
+    }
+
+    // ── Secrets Manager Client (2.21) ─────────────────────────────────────────
+    // Used to fetch encrypted secrets: DB passwords, API keys, tokens
+    // In production: IAM role must have secretsmanager:GetSecretValue
+    @Bean
+    public SecretsManagerClient secretsManagerClient() {
+        var builder = SecretsManagerClient.builder()
+                .region(Region.of(region));
+
+        if (endpointOverride != null) {
+            builder.endpointOverride(URI.create(endpointOverride));
+        }
+
+        return builder.build();
+    }
+
+    // ── SSM Parameter Store Client (2.21) ─────────────────────────────────────
+    // Used to fetch config values and SecureString params from Parameter Store
+    // In production: IAM role must have ssm:GetParameter, ssm:GetParametersByPath
+    @Bean
+    public SsmClient ssmClient() {
+        var builder = SsmClient.builder()
                 .region(Region.of(region));
 
         if (endpointOverride != null) {
